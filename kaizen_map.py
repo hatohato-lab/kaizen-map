@@ -40,6 +40,10 @@ GLOSSARY = {
     "テスト欠落": "対応するテストファイルが見つからないソースファイル",
     "設定の匂い": "CI未設定・.gitignore無し・秘密情報らしき直書き、といった設定まわりの危険信号",
     "死んだコード": "どこからも参照されていない可能性のあるファイル（参照の見落としがありうるため常に推定）",
+    "区画": "対象の最上位のまとまり（フォルダ1階層）。俯瞰はこの粒度で行う",
+    "兆候": "区画の外から機械的に測れる危険信号（休眠・入口不明・ごみ名・重複名・更新の偏り）",
+    "当たり付け": "兆候から深掘りする価値がありそうな区画に印を付ける工程。中身はまだ読まない",
+    "深掘り": "印の付いた区画だけをAIが中まで読み、種類を限定せず改善候補を出す工程。全指摘が推定",
 }
 
 SECRET_RE = re.compile(r"(?i)(password|passwd|api_?key|api_?token|secret)\s*[:=]\s*[\"'][^\"'\n]{4,}[\"']")
@@ -212,7 +216,132 @@ def load_judgements(path):
         return {}
 
 
+# ---------------- 工程(1)(2) 俯瞰と当たり付け ----------------
+
+GARBAGE_RE = re.compile(r"(?i)(コピー|copy|\(1\)|(^|[_ ])(旧|old|bak|tmp)([_ .]|$))")
+ENTRY_NAMES = re.compile(r"(?i)^(readme|claude|00_)")
+
+
+def survey_areas(root: Path):
+    """区画（最上位フォルダ）ごとの兆候を機械的に集める。中身のファイルは読まない。"""
+    import time
+    now = time.time()
+    areas = []
+    subnames = {}
+    tops = [d for d in sorted(root.iterdir())
+            if d.is_dir() and d.name not in {".git", "node_modules", "__pycache__"}]
+    for d in tops:
+        files = list_files(d)
+        newest = max((f.stat().st_mtime for f in files), default=0)
+        recent = sum(1 for f in files if now - f.stat().st_mtime < 30 * 86400)
+        garbage = [rel(root, f) for f in files if GARBAGE_RE.search(f.name)][:5]
+        entry = any(ENTRY_NAMES.match(x.name) for x in d.iterdir() if x.is_file())
+        for x in d.iterdir():
+            # 規約による意図的な同名（連番プレフィックスや定番名）は重複疑いから除外する
+            # （実ワークスペースで45区画中43に★が付き、当たり付けにならなかった実測より）
+            if x.is_dir() and not re.match(r"^[\d.]+_|^[._]", x.name) and x.name.lower() not in {
+                    "詳細", "運用", "images", "img", "css", "js", "docs", "src", "tests", "eval", "design", "data"}:
+                subnames.setdefault(x.name, []).append(d.name)
+        areas.append({"name": d.name, "files": len(files),
+                      "days_idle": int((now - newest) / 86400) if newest else 9999,
+                      "recent": recent, "garbage": garbage, "entry": entry})
+    dup = {k: v for k, v in subnames.items() if len(set(v)) > 1}
+    for a in areas:
+        signals = []
+        if a["files"] and a["days_idle"] > 90:
+            signals.append("休眠（{}日更新なし）".format(a["days_idle"]))
+        if a["files"] and not a["entry"]:
+            signals.append("入口不明（README等が無い）")
+        if a["garbage"]:
+            signals.append("ごみ名 {}件（例 {}）".format(len(a["garbage"]), a["garbage"][0]))
+        for k, owners in dup.items():
+            if a["name"] in owners:
+                signals.append("重複名の疑い（「{}」が {} にある）".format(k, "・".join(sorted(set(owners)))))
+        a["signals"] = signals
+    return areas
+
+
+def survey_uml(areas):
+    uml = ["@startuml", "skinparam defaultFontName Meiryo"]
+    for a in areas:
+        mark = " ★" if a["signals"] else ""
+        uml.append('folder "{}{}\\n{}ファイル" as {}'.format(
+            a["name"], mark, a["files"], re.sub(r"[^A-Za-z0-9]", "_", a["name"]) or "x"))
+    uml.append("@enduml")
+    return "\n".join(uml)
+
+
+def load_deep_findings(out_dir: Path):
+    """深掘り（工程(3)・AIが書いた findings-*.json）を読み込み、指摘に変換する。全件推定。"""
+    out = []
+    for f in sorted(Path(out_dir).glob("findings-*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict) and d.get("path") and d.get("text"):
+                out.append(finding("深掘り", str(d["path"]), str(d["text"]), sure=False))
+    return out
+
+
+def build_survey_html(target, areas, deep, judgements):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sections = [("overview", "概要"), ("map", "全体地図（工程1）"), ("areas", "区画と兆候（工程2）"),
+                ("deep", "深掘りの指摘（工程3）"), ("terms", "用語表"),
+                ("estimates", "推定表"), ("judgements", "判断履歴")]
+    nav = "".join('<a href="#{}">{}</a>'.format(i, esc(s)) for i, s in sections)
+    arows = "".join(
+        "<tr class='{}'><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            "est" if a["signals"] else "", "★" if a["signals"] else "", esc(a["name"]), a["files"],
+            a["days_idle"] if a["days_idle"] < 9999 else "—", a["recent"],
+            esc("／".join(a["signals"]) or "なし")) for a in areas)
+
+    def drows():
+        out = []
+        for f in deep:
+            j = judgements.get(f["id"], {})
+            if j.get("判断") == "却下":
+                continue
+            out.append("<tr class='est'><td><code>{}</code></td><td><code>{}</code></td>"
+                       "<td>【推定】{}</td><td>{}</td></tr>".format(
+                           f["id"], esc(f["path"]), esc(f["text"]), esc(j.get("判断", "未判断"))))
+        if not out:
+            return ("<p>まだ深掘りの指摘はありません。★の区画を選び、agent/発見レンズ.md の手順で "
+                    "<code>findings-&lt;区画名&gt;.json</code> を出力フォルダに置いて再実行してください。</p>")
+        return "<table><tr><th>ID</th><th>場所</th><th>内容</th><th>判断</th></tr>" + "".join(out) + "</table>"
+
+    est_rows = "".join(
+        "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>".format(
+            f["id"], esc(f["path"]), esc(f["text"]), esc(judgements.get(f["id"], {}).get("判断", "未確認")))
+        for f in deep) or "<tr><td colspan='4'>推定なし</td></tr>"
+    jrows = "".join(
+        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>".format(
+            fid, esc(j.get("判断", "")), esc(j.get("理由", "")))
+        for fid, j in judgements.items()) or "<tr><td colspan='3'>まだ判断の記録なし</td></tr>"
+    terms = "".join("<tr><td>{}</td><td>{}</td></tr>".format(esc(k), esc(v)) for k, v in GLOSSARY.items())
+    flagged = sum(1 for a in areas if a["signals"])
+    return ("<!DOCTYPE html><html lang=\"ja\"><head><meta charset=\"utf-8\">"
+            "<title>kaizen-map survey: " + esc(target) + "</title><style>" + CSS + "</style></head><body>"
+            "<nav><b>kaizen-map</b>" + nav + "</nav><main>"
+            "<h1 id=\"overview\">改善の地図（全体俯瞰） — " + esc(target) + "</h1>"
+            "<p>生成: " + now + "。工程は抽象→具体の順に進みます: "
+            "(1)俯瞰 → (2)当たり付け（★） → (3)深掘り（★の区画だけAIが中を読む） → (4)あなたが判断。</p>"
+            "<table><tr><th>区画数</th><th>★（気になる区画）</th><th>深掘りの指摘</th></tr>"
+            "<tr><td>" + str(len(areas)) + "</td><td>" + str(flagged) + "</td><td>" + str(len(deep)) + "</td></tr></table>"
+            "<h2 id=\"map\">全体地図（工程1）</h2>" + render_uml(survey_uml(areas)) +
+            "<h2 id=\"areas\">区画と兆候（工程2）</h2>"
+            "<table><tr><th>★</th><th>区画</th><th>ファイル数</th><th>休眠日数</th><th>30日内更新</th><th>兆候</th></tr>" + arows + "</table>"
+            "<h2 id=\"deep\">深掘りの指摘（工程3・すべて推定）</h2>" + drows() +
+            "<h2 id=\"terms\">用語表（語彙の乖離対策）</h2><table><tr><th>用語</th><th>この文書での意味</th></tr>" + terms + "</table>"
+            "<h2 id=\"estimates\">推定表（未確認の指摘の隔離場所）</h2>"
+            "<table><tr><th>ID</th><th>場所</th><th>内容</th><th>状態</th></tr>" + est_rows + "</table>"
+            "<h2 id=\"judgements\">判断履歴</h2><table><tr><th>ID</th><th>判断</th><th>理由</th></tr>" + jrows + "</table>"
+            "</main></body></html>")
+
+
 # ---------------- HTML ----------------
+
 
 CSS = """
 * { box-sizing: border-box; } body { margin:0; font-family: Meiryo, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
@@ -323,12 +452,34 @@ def run(target_dir, out_dir):
     return 0
 
 
+def run_survey(target_dir, out_dir):
+    root = Path(target_dir).resolve()
+    if not root.is_dir():
+        print(f"対象フォルダが見つかりません: {root}")
+        return 2
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    areas = survey_areas(root)
+    deep = load_deep_findings(out)
+    jpath = out / "judgements.json"
+    judgements = load_judgements(jpath)
+    merged = {f["id"]: {"判断": "", "理由": ""} for f in deep}
+    merged.update(judgements)
+    jpath.write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "index.html").write_text(build_survey_html(root.name, areas, deep, judgements), encoding="utf-8")
+    print(f"生成: {out / 'index.html'}")
+    print(f"区画 {len(areas)}・★ {sum(1 for a in areas if a['signals'])}・深掘り指摘 {len(deep)} 件")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="システムの地図と改善候補をHTML1枚にする")
     ap.add_argument("target", help="対象フォルダ")
     ap.add_argument("-o", "--out", default="kaizen-report", help="出力フォルダ（既定: kaizen-report）")
+    ap.add_argument("--survey", action="store_true",
+                    help="全体俯瞰モード（工程1・2＋深掘りの合流）。ワークスペース丸ごと向け")
     a = ap.parse_args()
-    return run(a.target, a.out)
+    return run_survey(a.target, a.out) if a.survey else run(a.target, a.out)
 
 
 if __name__ == "__main__":

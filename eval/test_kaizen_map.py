@@ -99,6 +99,76 @@ def main():
         l1_2 = html2.split('id="l1"')[1].split("<h2")[0]
         jd_2 = html2.split('id="judgements"')[1]
         check("11 却下は蒸し返さない", target_id not in l1_2 and target_id in jd_2 and "却下" in jd_2)
+        # ---- v2: 俯瞰（survey）モード ----
+        ws = tmp / "ws"
+        shutil.copytree(ROOT / "samples" / "demo_workspace", ws)
+        old = (ws / "90_dormant" / "archive.md")
+        import time
+        t100 = time.time() - 100 * 86400
+        os.utime(old, (t100, t100))
+        sout = tmp / "s1"
+
+        def run_survey(target, out):
+            env = dict(os.environ)
+            env["PLANTUML_REMOTE"] = "0"
+            env["PYTHONIOENCODING"] = "utf-8"
+            p = subprocess.run([sys.executable, "-X", "utf8", str(TOOL), str(target), "-o", str(out), "--survey"],
+                               capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
+            return p.returncode, p.stdout
+
+        rc, _ = run_survey(ws, sout)
+        shtml = (sout / "index.html").read_text(encoding="utf-8") if (sout / "index.html").exists() else ""
+
+        # 12. 俯瞰HTMLが生成され、7章（工程1〜3＋3表）がそろう
+        sids = set(re.findall(r'id="([a-z0-9]+)"', shtml))
+        need = {"overview", "map", "areas", "deep", "terms", "estimates", "judgements"}
+        check("12 俯瞰HTML生成と章構成", rc == 0 and need.issubset(sids), need - sids)
+
+        # 13. 兆候: 休眠・入口不明・ごみ名・重複名を検出
+        ok13 = ("休眠（" in shtml and "入口不明" in shtml and "ごみ名" in shtml
+                and "重複名の疑い" in shtml and "レシピ帳" in shtml)
+        check("13 4種の兆候を検出", ok13)
+
+        # 14. 正常区画（01_active）には★が付かない
+        row = re.search(r"<tr[^>]*><td>(★?)</td><td>01_active</td>", shtml)
+        check("14 正常区画に★なし", row is not None and row.group(1) == "", row.group(0) if row else "行なし")
+
+        # 15. 深掘りの合流: findings-*.json を置いて再実行すると推定として表に出る
+        (sout / "findings-02_no_entry.json").write_text(json.dumps([
+            {"path": "02_no_entry/data2.md", "text": "data1.md と内容が同一の重複（片方に統合できる）"},
+            {"path": "02_no_entry/料金表.md", "text": "名前と実態のズレ（中身は料金ではなく週次予定）"},
+        ], ensure_ascii=False), encoding="utf-8")
+        rc, _ = run_survey(ws, sout)
+        shtml2 = (sout / "index.html").read_text(encoding="utf-8")
+        deep_sec = shtml2.split('id="deep"')[1].split("<h2")[0]
+        ok15 = ("data2.md" in deep_sec and "料金表.md" in deep_sec and "【推定】" in deep_sec)
+        check("15 深掘り指摘の合流（推定扱い）", rc == 0 and ok15)
+
+        # 16. 深掘り指摘にも判断履歴が効く（却下→蒸し返さない）
+        j = json.loads((sout / "judgements.json").read_text(encoding="utf-8"))
+        m = re.search(r"<td><code>([0-9a-f]{8})</code></td><td><code>02_no_entry/data2\.md", shtml2)
+        j[m.group(1)] = {"判断": "却下", "理由": "意図的な複製（架空の理由）"}
+        (sout / "judgements.json").write_text(json.dumps(j, ensure_ascii=False), encoding="utf-8")
+        rc, _ = run_survey(ws, sout)
+        shtml3 = (sout / "index.html").read_text(encoding="utf-8")
+        deep3 = shtml3.split('id="deep"')[1].split("<h2")[0]
+        check("16 深掘りの却下も蒸し返さない", "data2.md" not in deep3 and "料金表.md" in deep3)
+
+        # 17. 発見レンズの検出力オラクル: 見本の正解（重複・名前ズレ）を、
+        #     良い findings は両方当て、盲目版・過剰版は落とす
+        EXPECTED = {"02_no_entry/data2.md", "02_no_entry/料金表.md"}
+        CLEAN = {"01_active"}
+
+        def grade(findings):
+            paths = {f.get("path", "") for f in findings}
+            recall = EXPECTED.issubset(paths)
+            precision = not any(p.split("/")[0] in CLEAN for p in paths)
+            return recall and precision
+
+        reference = [{"path": p, "text": "指摘"} for p in EXPECTED]
+        broken_blind = []
+        broken_over = reference + [{"path": "01_active/README.md", "text": "無理やりの指摘"}]
+        check("17 発見レンズのオラクル", grade(reference) and not grade(broken_blind) and not grade(broken_over))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
