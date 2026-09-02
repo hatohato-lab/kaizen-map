@@ -9,6 +9,14 @@ system, findings from independent improvement lenses, and three tables that keep
 the human and the AI aligned (glossary, unconfirmed estimates, judgement history).
 Standard library only. The rest of this README is in Japanese.
 
+## レポートの実物（スクリーンショット）
+
+![生成されるレポート](docs/screenshot.png)
+
+## しくみ（図解）
+
+![しくみ](docs/しくみ.svg)
+
 ## なぜ作ったか — 改善は「理解の乖離」で失敗する
 
 システムを知らないまま出された改善提案は的外れになり、
