@@ -52,7 +52,10 @@ python kaizen_map.py <対象フォルダ> -o <出力> --survey          # 全体
 
 - 出力：`kaizen-report/index.html`（左メニュー・白地黒文字・PlantUML図をSVG描画）と `judgements.json`
 - 判断のしかた：`judgements.json` の該当IDに `{"判断": "採用|却下|保留", "理由": "..."}` を書いて再実行
-- 図はマークダウン＋Mermaidではなく **HTML＋PlantUML**（公式サーバでSVG化。`PLANTUML_REMOTE=0` でソース表示に切替＝オフライン可）
+- 図はマークダウン＋Mermaidではなく **HTML＋PlantUML**。描画は3択（既定は**外部送信ゼロ**）:
+  - `PLANTUML_JAR=<plantuml.jarのパス>` … ローカルでSVG化（推奨）
+  - `PLANTUML_REMOTE=1` … 公式サーバでSVG化（図の内容が外部へ送られる。明示オプトイン）
+  - 指定なし … 図はソース表示（機能はすべて動く）
 
 ## いまのレンズ（第1層・すべて決定的判定）
 
@@ -86,6 +89,19 @@ python eval/test_kaizen_map.py
 - レンズは第1層（形式検査）のみ。意味の層（命名と実態のズレ等）は地図で認識を合わせた後の将来課題
 - 死んだコード検出は文字列参照の単純な突き合わせで、動的参照は見えない（だから推定扱いにしている）
 - テスト対応は `test_<名前>` / `<名前>_test` の命名規約前提
+
+## 関連ツール（Claude Code 運用ファミリー）
+
+同じ思想（機械判定の eval 同梱・フェイルオープン・判断は人間に返す）で作った道具の家族です。
+
+| ツール | 役割 |
+|---|---|
+| [claude-code-hikitsugi](https://github.com/hatohato-lab/claude-code-hikitsugi) | チャット乗り換え時の引き継ぎ（過去→未来） |
+| [claude-code-rules-sync](https://github.com/hatohato-lab/claude-code-rules-sync) | ルール変更の全チャット通知（放送） |
+| [claude-code-kokuban](https://github.com/hatohato-lab/claude-code-kokuban) | チャット間の黒板（双方向の連絡） |
+| [claude-code-context-meter](https://github.com/hatohato-lab/claude-code-context-meter) | 各チャットの容量の見える化（乗り換えどきの判断材料） |
+| [claude-code-version-guard](https://github.com/hatohato-lab/claude-code-version-guard) | Claude Code 本体のバージョンの遅れの見張り |
+| **kaizen-map**（本リポジトリ） | システムの地図と改善候補を1枚のHTMLに |
 
 ## ライセンス
 

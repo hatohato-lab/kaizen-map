@@ -15,7 +15,8 @@
 - 推定表    … 確認できていない指摘は「推定」に隔離し、承認されるまで確定扱いしない
 - 判断履歴  … 採用/却下と理由を記録し、却下済みを蒸し返さない（学習の差対策）
 
-環境変数 PLANTUML_REMOTE=0 で図をソース表示に切り替え（オフライン・eval用に決定的）。
+図の描画は既定で外部送信ゼロ（ソース表示）。PLANTUML_JAR=<plantuml.jarのパス> でローカルSVG化、
+PLANTUML_REMOTE=1 で公式サーバ描画（明示オプトイン）。
 """
 
 import argparse
@@ -194,8 +195,25 @@ def plantuml_encode(text):
 
 
 def render_uml(src):
-    """公式サーバでSVG化。PLANTUML_REMOTE=0 や失敗時はソースを <pre> で表示（黙って壊さない）。"""
-    if os.environ.get("PLANTUML_REMOTE", "1") != "0":
+    """PlantUML図の描画。既定は外部送信ゼロ（ソース表示）。
+
+    1. PLANTUML_JAR にローカルの plantuml.jar を指定 → ローカルでSVG化（外部送信ゼロ・推奨）
+    2. PLANTUML_REMOTE=1 → 公式サーバでSVG化（図の内容が外部に送られる。明示オプトイン）
+    3. どちらも無し／失敗 → ソースを <pre> で表示（黙って壊さない）
+    """
+    jar = os.environ.get("PLANTUML_JAR")
+    if jar:
+        try:
+            import subprocess
+            p = subprocess.run(["java", "-Djava.awt.headless=true", "-jar", jar,
+                                "-tsvg", "-charset", "UTF-8", "-pipe"],
+                               input=src.encode("utf-8"), capture_output=True, timeout=60)
+            svg = p.stdout.decode("utf-8", "replace")
+            if "<svg" in svg:
+                return svg[svg.index("<svg"):]
+        except Exception:
+            pass
+    if os.environ.get("PLANTUML_REMOTE", "0") == "1":
         try:
             url = "https://www.plantuml.com/plantuml/svg/" + plantuml_encode(src)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 kaizen-map"})
